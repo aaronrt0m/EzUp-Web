@@ -265,16 +265,18 @@
         <span class="flex items-center gap-2 text-clay">
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-clay"></span>
           Compressing
-        </span>
-        <span class="mt-2 block h-1 w-24 overflow-hidden rounded-full bg-ink/10">
-          <span class="progress-fill block h-full rounded-full bg-clay" style="width:${item.progress}%"></span>
         </span>`
       : item.status === "done"
-        ? `
+        ? item.upload.status === "complete"
+          ? `
           <span class="flex items-center gap-1.5 font-semibold ${item.withinLimit ? "text-forest" : "text-clay"}">
             <span>${item.withinLimit ? "✓" : "!"}</span>
-            ${item.withinLimit ? "Ready" : "Over size target"}
+            ${item.withinLimit ? "Upload complete" : "Over size target"}
+          </span>
+          <span class="mt-2 block h-1 w-24 overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload complete" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+            <span class="progress-fill block h-full rounded-full bg-forest" style="width:100%"></span>
           </span>`
+          : `<span class="text-xs font-semibold text-muted">Waiting for upload</span>`
         : `
           <span class="font-semibold text-red-700" title="${escapeHTML(item.error || "Compression failed")}">
             Could not compress
@@ -298,16 +300,7 @@
         >
           Download <span aria-hidden="true">↓</span>
         </a>`
-      : `
-        <button
-          type="button"
-          disabled
-          class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-ink/5 px-3 py-2 text-xs font-bold text-muted opacity-70"
-          aria-label="Download available after upload completes"
-          title="Download available after upload completes"
-        >
-          Download <span aria-hidden="true">↓</span>
-        </button>`;
+      : "";
     const uploadAction = item.status === "done"
       ? renderUploadAction(item.upload)
       : "";
