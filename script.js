@@ -78,26 +78,7 @@
     };
   }
 
-  function renderUploadAction(upload) {
-    if (upload.status === "complete") {
-      return `<span class="px-3 py-2 text-xs font-semibold text-forest">Uploaded ✓</span>`;
-    }
-
-    if (upload.status === "uploading" || upload.status === "retrying") {
-      const label = upload.status === "retrying"
-        ? `${navigator.onLine ? "Reconnecting" : "Waiting for internet"} · ${upload.progress}%`
-        : `Uploading · ${upload.progress}%`;
-      return `<span class="px-3 py-2 text-xs font-semibold text-muted" role="status">${label}</span>`;
-    }
-
-    if (upload.status === "error") {
-      return `<span class="px-3 py-2 text-xs font-semibold text-red-700" role="status" title="${escapeHTML(upload.error)}">Upload failed</span>`;
-    }
-
-    return `<span class="px-3 py-2 text-xs font-semibold text-muted" role="status">Upload queued</span>`;
-  }
-
-  function startResumableUpload(file, uploadState, onUpdate) {
+  function startResumableUpload(file, uploadState, onUpdate, onComplete) {
     if (uploadState.status === "uploading" || uploadState.status === "retrying") return;
 
     const endpoint = window.EZUP_TUS_ENDPOINT;
@@ -115,7 +96,7 @@
     }
     if (file.size > maxUploadBytes) {
       uploadState.status = "error";
-      uploadState.error = "The compressed image exceeds the 60 MiB upload limit.";
+      uploadState.error = "The image exceeds the 60 MiB upload limit.";
       onUpdate();
       return;
     }
@@ -142,9 +123,21 @@
           filetype: file.type || "application/octet-stream"
         },
         onChunkComplete(_chunkSize, bytesAccepted, bytesTotal) {
-          uploadState.progress = bytesTotal
-            ? Math.floor((bytesAccepted / bytesTotal) * 100)
-            : 0;
+          if (bytesTotal) {
+            uploadState.progress = Math.max(
+              uploadState.progress,
+              Math.min(99, Math.floor((bytesAccepted / bytesTotal) * 100))
+            );
+          }
+          uploadState.status = navigator.onLine ? "uploading" : "retrying";
+          onUpdate();
+        },
+        onProgress(bytesUploaded, bytesTotal) {
+          if (!bytesTotal) return;
+          uploadState.progress = Math.max(
+            uploadState.progress,
+            Math.min(99, Math.floor((bytesUploaded / bytesTotal) * 100))
+          );
           uploadState.status = navigator.onLine ? "uploading" : "retrying";
           onUpdate();
         },
@@ -181,6 +174,7 @@
           uploadState.retryNow = null;
           activeUploads.delete(uploadState);
           onUpdate();
+          if (onComplete) onComplete();
         }
       });
 
@@ -260,26 +254,40 @@
 
   // Render the status, output size, and download action for an image.
   function renderItem(item) {
-    const statusContent = item.status === "processing"
+    const statusContent = item.upload.status === "error"
+      ? `
+        <span class="font-semibold text-red-700" title="${escapeHTML(item.upload.error || "Upload failed")}">
+          Upload failed
+        </span>`
+      : item.status === "uploading"
+      ? `
+        <span class="flex items-center justify-between gap-2 text-muted">
+          <span>${item.upload.status === "retrying"
+            ? (navigator.onLine ? "Reconnecting upload" : "Waiting for internet")
+            : "Uploading"}</span>
+          <span class="mono tabular-nums">${item.upload.progress}%</span>
+        </span>
+        <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${item.upload.progress}">
+          <span class="progress-fill block h-full rounded-full bg-forest transition-[width]" style="width:${item.upload.progress}%"></span>
+        </span>`
+      : item.status === "processing"
       ? `
         <span class="flex items-center gap-2 text-clay">
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-clay"></span>
           Compressing
+        </span>
+        <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Compression progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${item.progress}">
+          <span class="progress-fill block h-full rounded-full bg-clay transition-[width]" style="width:${item.progress}%"></span>
         </span>`
       : item.status === "done"
-        ? item.upload.status === "complete"
-          ? `
+        ? `
           <span class="flex items-center gap-1.5 font-semibold ${item.withinLimit ? "text-forest" : "text-clay"}">
             <span>${item.withinLimit ? "✓" : "!"}</span>
-            ${item.withinLimit ? "Upload complete" : "Over size target"}
-          </span>
-          <span class="mt-2 block h-1 w-24 overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload complete" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
-            <span class="progress-fill block h-full rounded-full bg-forest" style="width:100%"></span>
+            ${item.withinLimit ? "Ready to download" : "Over size target"}
           </span>`
-          : `<span class="text-xs font-semibold text-muted">Waiting for upload</span>`
         : `
-          <span class="font-semibold text-red-700" title="${escapeHTML(item.error || "Compression failed")}">
-            Could not compress
+          <span class="font-semibold text-red-700" title="${escapeHTML(item.upload.error || item.error || "Processing failed")}">
+              Could not compress
           </span>`;
     const output = item.status === "done"
       ? `
@@ -300,9 +308,6 @@
         >
           Download <span aria-hidden="true">↓</span>
         </a>`
-      : "";
-    const uploadAction = item.status === "done"
-      ? renderUploadAction(item.upload)
       : "";
 
     const row = document.getElementById(`item-${item.id}`);
@@ -337,7 +342,6 @@
       </div>
       <div class="flex flex-wrap items-center justify-end gap-2">
         ${download}
-        ${uploadAction}
       </div>`;
   }
 
@@ -354,7 +358,7 @@
     const item = {
       id,
       file,
-      status: "processing",
+      status: "uploading",
       progress: 0,
       output: null,
       url: null,
@@ -397,6 +401,32 @@
     return batch;
   }
 
+  function startItemUpload(item, settings) {
+    const updateUpload = () => {
+      if (item.upload.status === "error") {
+        item.status = "error";
+        item.error = item.upload.error;
+        notice.textContent = `${item.file.name}: ${item.upload.error}`;
+      }
+      renderItem(item);
+      if (item.folderBatchId) {
+        const batch = folderBatches.get(item.folderBatchId);
+        if (batch) {
+          renderFolderBatch(batch);
+          buildFolderArchive(batch);
+        }
+      }
+    };
+
+    startResumableUpload(item.file, item.upload, updateUpload, () => {
+      if (!items.has(item.id)) return;
+      item.status = "processing";
+      item.progress = 0;
+      renderItem(item);
+      compressItem(item, settings);
+    });
+  }
+
   function renderFolderBatch(batch) {
     let card = document.getElementById(`folder-archive-${batch.id}`);
     if (!card) {
@@ -435,7 +465,7 @@
   // Package a completed folder batch into a downloadable ZIP archive.
   async function buildFolderArchive(batch) {
     const succeeded = batch.items.filter(item => item.status === "done");
-    if (batch.items.some(item => item.status === "processing")) return;
+    if (batch.items.some(item => item.status === "uploading" || item.status === "processing")) return;
     if (!succeeded.length) {
       batch.status = "error";
       renderFolderBatch(batch);
@@ -587,9 +617,6 @@
     }
     if (items.has(item.id)) {
       renderItem(item);
-      if (item.status === "done") {
-        startResumableUpload(item.output, item.upload, () => renderItem(item));
-      }
       if (item.folderBatchId) {
         const batch = folderBatches.get(item.folderBatchId);
         if (batch) {
@@ -618,9 +645,12 @@
     const settings = getSettings();
     if (folderName && imageFiles.length) {
       const batch = makeFolderBatch(folderName, imageFiles);
-      batch.items.forEach(item => compressItem(item, settings));
+      batch.items.forEach(item => startItemUpload(item, settings));
     } else {
-      imageFiles.forEach(({ file }) => compressItem(makeItem(file), settings));
+      imageFiles.forEach(({ file }) => {
+        const item = makeItem(file);
+        startItemUpload(item, settings);
+      });
     }
     fileInput.value = "";
     folderInput.value = "";
