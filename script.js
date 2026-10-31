@@ -19,6 +19,7 @@
   const notice = document.getElementById("notice");
   const items = new Map();
   const folderBatches = new Map();
+  const activeUploads = new Set();
   let nextId = 0;
   let nextFolderId = 0;
 
@@ -68,7 +69,10 @@
       progress: 0,
       error: "",
       task: null,
-      retryTimer: null
+      uploadUrl: null,
+      retryTimer: null,
+      retryNow: null,
+      onUpdate: null
     };
   }
 
@@ -79,7 +83,7 @@
 
     if (upload.status === "uploading" || upload.status === "retrying") {
       const label = upload.status === "retrying"
-        ? `Reconnecting · ${upload.progress}%`
+        ? `${navigator.onLine ? "Reconnecting" : "Waiting for internet"} · ${upload.progress}%`
         : `Uploading · ${upload.progress}%`;
       return `<span class="px-3 py-2 text-xs font-semibold text-muted" role="status">${label}</span>`;
     }
@@ -97,6 +101,8 @@
   }
 
   function startResumableUpload(file, uploadState, onUpdate) {
+    if (uploadState.status === "uploading" || uploadState.status === "retrying") return;
+
     const endpoint = window.EZUP_TUS_ENDPOINT;
     if (!window.tus || typeof window.tus.Upload !== "function") {
       uploadState.status = "error";
@@ -113,24 +119,36 @@
 
     uploadState.status = "uploading";
     uploadState.error = "";
-    uploadState.progress = 0;
+    if (!uploadState.uploadUrl) uploadState.progress = 0;
+    uploadState.retryNow = null;
+    uploadState.onUpdate = onUpdate;
+    activeUploads.add(uploadState);
     onUpdate();
 
     function startAttempt() {
+      uploadState.retryTimer = null;
+      uploadState.status = navigator.onLine ? "uploading" : "retrying";
+      onUpdate();
       const upload = new window.tus.Upload(file, {
         endpoint,
+        uploadUrl: uploadState.uploadUrl,
         chunkSize: 5 * 1024 * 1024,
         retryDelays: [0, 1000, 3000, 5000, 10000],
         metadata: {
           filename: file.name,
           filetype: file.type || "application/octet-stream"
         },
-        onProgress(bytesUploaded, bytesTotal) {
+        onChunkComplete(_chunkSize, bytesAccepted, bytesTotal) {
           uploadState.progress = bytesTotal
-            ? Math.floor((bytesUploaded / bytesTotal) * 100)
+            ? Math.floor((bytesAccepted / bytesTotal) * 100)
             : 0;
-          if (uploadState.status !== "retrying") uploadState.status = "uploading";
+          uploadState.status = navigator.onLine ? "uploading" : "retrying";
           onUpdate();
+        },
+        onUploadUrlAvailable() {
+          if (uploadState.task === upload) {
+            uploadState.uploadUrl = upload.url;
+          }
         },
         onError(error) {
           const status = error.originalResponse?.getStatus?.();
@@ -138,6 +156,8 @@
             uploadState.status = "error";
             uploadState.error = error.message || `Upload rejected (${status}).`;
             uploadState.task = null;
+            uploadState.retryNow = null;
+            activeUploads.delete(uploadState);
             onUpdate();
             return;
           }
@@ -145,6 +165,7 @@
           uploadState.status = "retrying";
           uploadState.error = "";
           uploadState.task = null;
+          uploadState.retryNow = startAttempt;
           onUpdate();
           uploadState.retryTimer = window.setTimeout(startAttempt, 5000);
         },
@@ -153,30 +174,52 @@
           uploadState.progress = 100;
           uploadState.error = "";
           uploadState.task = null;
+          uploadState.uploadUrl = null;
+          uploadState.retryNow = null;
+          activeUploads.delete(uploadState);
           onUpdate();
         }
       });
 
       uploadState.task = upload;
+      const start = () => {
+        if (uploadState.task === upload) upload.start();
+      };
+
+      if (uploadState.uploadUrl) {
+        start();
+        return;
+      }
+
       upload.findPreviousUploads().then(previousUploads => {
         if (uploadState.task !== upload) return;
-        if (previousUploads.length) {
-          upload.resumeFromPreviousUpload(previousUploads[0]);
+        const latestUpload = previousUploads
+          .slice()
+          .sort((a, b) => Date.parse(b.creationTime) - Date.parse(a.creationTime))[0];
+        if (latestUpload) {
+          upload.resumeFromPreviousUpload(latestUpload);
+          uploadState.uploadUrl = latestUpload.uploadUrl;
         }
-        upload.start();
+        start();
       }).catch(error => {
         if (uploadState.task !== upload) return;
         uploadState.status = "error";
         uploadState.error = error instanceof Error ? error.message : "Could not resume this upload.";
         uploadState.task = null;
+        uploadState.retryNow = null;
+        activeUploads.delete(uploadState);
         onUpdate();
       });
     }
 
+    uploadState.retryNow = startAttempt;
     startAttempt();
   }
 
   function stopUpload(uploadState) {
+    activeUploads.delete(uploadState);
+    uploadState.retryNow = null;
+    uploadState.onUpdate = null;
     if (uploadState.retryTimer !== null) {
       window.clearTimeout(uploadState.retryTimer);
       uploadState.retryTimer = null;
@@ -186,6 +229,31 @@
       uploadState.task = null;
     }
   }
+
+  window.addEventListener("offline", () => {
+    activeUploads.forEach(uploadState => {
+      if (uploadState.status !== "uploading") return;
+      uploadState.status = "retrying";
+      uploadState.onUpdate?.();
+    });
+  });
+
+  window.addEventListener("online", () => {
+    activeUploads.forEach(uploadState => {
+      if (
+        uploadState.status !== "retrying" ||
+        uploadState.task ||
+        !uploadState.retryNow
+      ) {
+        return;
+      }
+      if (uploadState.retryTimer !== null) {
+        window.clearTimeout(uploadState.retryTimer);
+        uploadState.retryTimer = null;
+      }
+      uploadState.retryNow();
+    });
+  });
 
   // Render the status, output size, and download action for an image.
   function renderItem(item) {
@@ -311,7 +379,6 @@
       paths: new Map(),
       archiveURL: null,
       archiveFile: null,
-      upload: createUploadState(),
       status: "processing"
     };
     files.forEach(({ file, path }) => {
@@ -347,7 +414,7 @@
       ? `
         <div class="flex flex-wrap items-center gap-2">
           <a href="${batch.archiveURL}" download="${escapeHTML(batch.folderName)}.zip" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-sm bg-forest px-4 py-2.5 text-xs font-bold text-white transition hover:bg-sky-900 focus:outline-none focus:ring-2 focus:ring-forest/40">Download ZIP <span aria-hidden="true">↓</span></a>
-          ${renderUploadAction(batch.upload, `data-upload-folder="${batch.id}"`)}
+          <span class="text-xs text-muted">ZIP uploads are not accepted by the server.</span>
         </div>`
       : `<span class="shrink-0 border border-ink/10 bg-white px-4 py-2.5 text-xs font-bold ${batch.status === "error" ? "text-red-700" : "text-muted"}">${batch.status === "zipping" ? "Preparing…" : batch.status === "error" ? "ZIP unavailable" : "ZIP pending"}</span>`;
     card.innerHTML = `
@@ -609,14 +676,6 @@
     if (!item || item.status !== "done") return;
     startResumableUpload(item.output, item.upload, () => renderItem(item));
   });
-  folderArchives.addEventListener("click", event => {
-    const button = event.target.closest("[data-upload-folder]");
-    if (!button) return;
-
-    const batch = folderBatches.get(Number(button.dataset.uploadFolder));
-    if (!batch || batch.status !== "ready" || !batch.archiveFile) return;
-    startResumableUpload(batch.archiveFile, batch.upload, () => renderFolderBatch(batch));
-  });
   ["dragenter", "dragover"].forEach(type => dropZone.addEventListener(type, event => {
     event.preventDefault();
     event.stopPropagation();
@@ -637,7 +696,6 @@
       if (row) row.remove();
     });
     folderBatches.forEach(batch => {
-      stopUpload(batch.upload);
       if (batch.archiveURL) URL.revokeObjectURL(batch.archiveURL);
       const card = document.getElementById(`folder-archive-${batch.id}`);
       if (card) card.remove();
