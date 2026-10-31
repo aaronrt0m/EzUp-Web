@@ -288,7 +288,7 @@
       : item.status === "error"
         ? `<span class="text-xs text-red-700">${escapeHTML(item.error || "Try another image.")}</span>`
         : `<span class="text-muted">—</span>`;
-    const download = item.status === "done"
+    const download = item.status === "done" && item.upload.status === "complete"
       ? `
         <a
           href="${item.url}"
@@ -298,7 +298,16 @@
         >
           Download <span aria-hidden="true">↓</span>
         </a>`
-      : `<span class="rounded-lg bg-ink/5 px-3 py-2 text-xs font-bold text-muted">Download</span>`;
+      : `
+        <button
+          type="button"
+          disabled
+          class="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-ink/5 px-3 py-2 text-xs font-bold text-muted opacity-70"
+          aria-label="Download available after upload completes"
+          title="Download available after upload completes"
+        >
+          Download <span aria-hidden="true">↓</span>
+        </button>`;
     const uploadAction = item.status === "done"
       ? renderUploadAction(item.upload)
       : "";
