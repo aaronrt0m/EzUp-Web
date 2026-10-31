@@ -20,6 +20,7 @@
   const items = new Map();
   const folderBatches = new Map();
   const activeUploads = new Set();
+  const maxUploadBytes = 60 * 1024 * 1024;
   let nextId = 0;
   let nextFolderId = 0;
 
@@ -53,7 +54,8 @@
   function formatBytes(bytes) {
     if (!Number.isFinite(bytes)) return "—";
     if (bytes < 1024) return `${bytes} B`;
-    return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
   function updateBatchState() {
@@ -76,7 +78,7 @@
     };
   }
 
-  function renderUploadAction(upload, targetAttribute) {
+  function renderUploadAction(upload) {
     if (upload.status === "complete") {
       return `<span class="px-3 py-2 text-xs font-semibold text-forest">Uploaded ✓</span>`;
     }
@@ -88,16 +90,11 @@
       return `<span class="px-3 py-2 text-xs font-semibold text-muted" role="status">${label}</span>`;
     }
 
-    const label = upload.status === "error" ? "Retry upload" : "Upload";
-    const title = upload.error ? ` title="${escapeHTML(upload.error)}"` : "";
-    return `
-      <button
-        type="button"
-        ${targetAttribute}
-        class="inline-flex items-center gap-2 rounded-sm border border-forest px-3 py-2 text-xs font-bold text-forest transition hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-forest/40"${title}
-      >
-        ${label} <span aria-hidden="true">↑</span>
-      </button>`;
+    if (upload.status === "error") {
+      return `<span class="px-3 py-2 text-xs font-semibold text-red-700" role="status" title="${escapeHTML(upload.error)}">Upload failed</span>`;
+    }
+
+    return `<span class="px-3 py-2 text-xs font-semibold text-muted" role="status">Upload queued</span>`;
   }
 
   function startResumableUpload(file, uploadState, onUpdate) {
@@ -113,6 +110,12 @@
     if (!endpoint || endpoint.includes("YOUR-FLY-SERVICE")) {
       uploadState.status = "error";
       uploadState.error = "Set the tus server URL in upload-config.js.";
+      onUpdate();
+      return;
+    }
+    if (file.size > maxUploadBytes) {
+      uploadState.status = "error";
+      uploadState.error = "The compressed image exceeds the 60 MiB upload limit.";
       onUpdate();
       return;
     }
@@ -297,7 +300,7 @@
         </a>`
       : `<span class="rounded-lg bg-ink/5 px-3 py-2 text-xs font-bold text-muted">Download</span>`;
     const uploadAction = item.status === "done"
-      ? renderUploadAction(item.upload, `data-upload-item="${item.id}"`)
+      ? renderUploadAction(item.upload)
       : "";
 
     const row = document.getElementById(`item-${item.id}`);
@@ -519,9 +522,14 @@
   async function compressItem(item, settings) {
     try {
       if ((settings.width !== null && (!Number.isInteger(settings.width) || settings.width < 1)) ||
-          (settings.height !== null && (!Number.isInteger(settings.height) || settings.height < 1)) ||
-          !Number.isFinite(settings.maxKB) || settings.maxKB <= 0) {
+          (settings.height !== null && (!Number.isInteger(settings.height) || settings.height < 1))) {
+        throw new Error("Enter valid image dimensions.");
+      }
+      if (!Number.isFinite(settings.maxKB) || settings.maxKB <= 0) {
         throw new Error("Enter valid dimensions and a size limit greater than zero.");
+      }
+      if (settings.maxKB > maxUploadBytes / 1024) {
+        throw new Error("The maximum compressed size is 60 MiB (60 MB).");
       }
       if (!window.imageCompression) {
         throw new Error("The compression library did not load. Check your connection and refresh.");
@@ -556,6 +564,9 @@
     }
     if (items.has(item.id)) {
       renderItem(item);
+      if (item.status === "done") {
+        startResumableUpload(item.output, item.upload, () => renderItem(item));
+      }
       if (item.folderBatchId) {
         const batch = folderBatches.get(item.folderBatchId);
         if (batch) {
@@ -667,14 +678,6 @@
     const firstPath = event.target.files[0]?.webkitRelativePath || "";
     const folderName = firstPath.split("/")[0] || "compressed-images";
     acceptFiles(event.target.files, folderName);
-  });
-  batchList.addEventListener("click", event => {
-    const button = event.target.closest("[data-upload-item]");
-    if (!button) return;
-
-    const item = items.get(Number(button.dataset.uploadItem));
-    if (!item || item.status !== "done") return;
-    startResumableUpload(item.output, item.upload, () => renderItem(item));
   });
   ["dragenter", "dragover"].forEach(type => dropZone.addEventListener(type, event => {
     event.preventDefault();
