@@ -537,19 +537,40 @@
         throw new Error("The compression library did not load. Check your connection and refresh.");
       }
       const resized = await fitImageToBounds(item.file, settings.width, settings.height);
-      const compressed = await window.imageCompression(resized.file, {
-        maxSizeMB: settings.maxKB / 1024,
-        maxWidthOrHeight: resized.maxWidthOrHeight,
-        useWebWorker: true,
-        maxIteration: 15,
-        initialQuality: 0.9,
-        fileType: "image/jpeg",
-        onProgress: progress => {
-          if (!items.has(item.id)) return;
-          item.progress = Math.max(5, Math.min(95, Math.round(progress)));
-          renderItem(item);
+      const maxSizeBytes = settings.maxKB * 1024;
+      let maxWidthOrHeight = resized.maxWidthOrHeight;
+      let compressed;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        compressed = await window.imageCompression(resized.file, {
+          maxSizeMB: settings.maxKB / 1024,
+          maxWidthOrHeight,
+          useWebWorker: true,
+          maxIteration: 15,
+          initialQuality: 0.9,
+          fileType: "image/jpeg",
+          onProgress: progress => {
+            if (!items.has(item.id)) return;
+            item.progress = Math.max(5, Math.min(95, Math.round(progress)));
+            renderItem(item);
+          }
+        });
+        if (compressed.size <= maxSizeBytes) break;
+        if (maxWidthOrHeight <= 1) {
+          throw new Error(`Could not compress this image below ${settings.sizeLabel}. Try a larger size target.`);
         }
-      });
+
+        const nextMaxWidthOrHeight = Math.max(
+          1,
+          Math.floor(maxWidthOrHeight * Math.max(0.2, Math.min(0.85, Math.sqrt(maxSizeBytes / compressed.size) * 0.9)))
+        );
+        if (nextMaxWidthOrHeight >= maxWidthOrHeight) {
+          throw new Error(`Could not compress this image below ${settings.sizeLabel}. Try a larger size target.`);
+        }
+        maxWidthOrHeight = nextMaxWidthOrHeight;
+      }
+      if (compressed.size > maxSizeBytes) {
+        throw new Error(`Could not compress this image below ${settings.sizeLabel}. Try a larger size target.`);
+      }
       if (!items.has(item.id)) return;
       item.output = new File([compressed], resized.file.name, { type: compressed.type || "image/jpeg", lastModified: Date.now() });
       item.url = URL.createObjectURL(item.output);
