@@ -270,6 +270,15 @@
         <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${item.upload.progress}">
           <span class="progress-fill block h-full rounded-full bg-forest transition-[width]" style="width:${item.upload.progress}%"></span>
         </span>`
+      : item.status === "uploaded"
+      ? `
+        <span class="flex items-center justify-between gap-2 font-semibold text-forest">
+          <span>Uploaded ✓</span>
+          <span class="mono tabular-nums">100%</span>
+        </span>
+        <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload complete" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+          <span class="progress-fill block h-full rounded-full bg-forest" style="width:100%"></span>
+        </span>`
       : item.status === "processing"
       ? `
         <span class="flex items-center gap-2 text-clay">
@@ -420,10 +429,22 @@
 
     startResumableUpload(item.file, item.upload, updateUpload, () => {
       if (!items.has(item.id)) return;
-      item.status = "processing";
-      item.progress = 0;
+      item.status = "uploaded";
       renderItem(item);
-      compressItem(item, settings);
+      if (item.folderBatchId) {
+        const batch = folderBatches.get(item.folderBatchId);
+        if (batch) {
+          renderFolderBatch(batch);
+          buildFolderArchive(batch);
+        }
+      }
+      window.setTimeout(() => {
+        if (!items.has(item.id) || item.status !== "uploaded") return;
+        item.status = "processing";
+        item.progress = 0;
+        renderItem(item);
+        compressItem(item, settings);
+      }, 800);
     });
   }
 
@@ -465,7 +486,7 @@
   // Package a completed folder batch into a downloadable ZIP archive.
   async function buildFolderArchive(batch) {
     const succeeded = batch.items.filter(item => item.status === "done");
-    if (batch.items.some(item => item.status === "uploading" || item.status === "processing")) return;
+    if (batch.items.some(item => ["uploading", "uploaded", "processing"].includes(item.status))) return;
     if (!succeeded.length) {
       batch.status = "error";
       renderFolderBatch(batch);
