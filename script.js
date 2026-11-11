@@ -1,5 +1,5 @@
 (() => {
-  // Portal presets and shared page elements.
+  // Settings and shared page state.
   const presets = {
     etlab: { width: 150, height: 200, maxKB: 30, sizeLabel: "30 KB" },
     ssc: { width: 200, height: 230, maxKB: 50, sizeLabel: "50 KB" }
@@ -19,12 +19,10 @@
   const notice = document.getElementById("notice");
   const items = new Map();
   const folderBatches = new Map();
-  const activeUploads = new Set();
-  const maxUploadBytes = 60 * 1024 * 1024;
   let nextId = 0;
   let nextFolderId = 0;
 
-  // Read the active preset or the user's custom compression settings.
+  // Get the active preset or custom compression settings.
   function getSettings() {
     if (presetSelect.value !== "custom") return presets[presetSelect.value];
 
@@ -42,6 +40,7 @@
     };
   }
 
+  // Refresh the displayed compression target.
   function updateTarget() {
     const custom = presetSelect.value === "custom";
     customFields.classList.toggle("hidden", !custom);
@@ -50,7 +49,8 @@
     targetSummary.textContent = `${settings.width === null ? "Original" : settings.width} × ${settings.height === null ? "Original" : settings.height} px · ≤ ${settings.sizeLabel}`;
   }
 
-  // Shared display helpers and batch state.
+  // Display helpers and batch state.
+  // Format a byte count for display.
   function formatBytes(bytes) {
     if (!Number.isFinite(bytes)) return "—";
     if (bytes < 1024) return `${bytes} B`;
@@ -58,6 +58,7 @@
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
+  // Update the file count and empty-state visibility.
   function updateBatchState() {
     const count = items.size;
     fileCount.textContent = `${count} ${count === 1 ? "file" : "files"}`;
@@ -65,221 +66,10 @@
     clearButton.classList.toggle("hidden", count === 0);
   }
 
-  function createUploadState() {
-    return {
-      status: "idle",
-      progress: 0,
-      error: "",
-      task: null,
-      uploadUrl: null,
-      retryTimer: null,
-      retryNow: null,
-      onUpdate: null
-    };
-  }
-
-  function startResumableUpload(file, uploadState, onUpdate, onComplete) {
-    if (uploadState.status === "uploading" || uploadState.status === "retrying") return;
-
-    const endpoint = window.EZUP_TUS_ENDPOINT;
-    if (!window.tus || typeof window.tus.Upload !== "function") {
-      uploadState.status = "error";
-      uploadState.error = "The resumable upload library did not load. Check your connection and refresh.";
-      onUpdate();
-      return;
-    }
-    if (!endpoint || endpoint.includes("YOUR-FLY-SERVICE")) {
-      uploadState.status = "error";
-      uploadState.error = "Set the tus server URL in upload-config.js.";
-      onUpdate();
-      return;
-    }
-    if (file.size > maxUploadBytes) {
-      uploadState.status = "error";
-      uploadState.error = "The image exceeds the 60 MiB upload limit.";
-      onUpdate();
-      return;
-    }
-
-    uploadState.status = "uploading";
-    uploadState.error = "";
-    if (!uploadState.uploadUrl) uploadState.progress = 0;
-    uploadState.retryNow = null;
-    uploadState.onUpdate = onUpdate;
-    activeUploads.add(uploadState);
-    onUpdate();
-
-    function startAttempt() {
-      uploadState.retryTimer = null;
-      uploadState.status = navigator.onLine ? "uploading" : "retrying";
-      onUpdate();
-      const upload = new window.tus.Upload(file, {
-        endpoint,
-        uploadUrl: uploadState.uploadUrl,
-        chunkSize: 5 * 1024 * 1024,
-        retryDelays: [0, 1000, 3000, 5000, 10000],
-        metadata: {
-          filename: file.name,
-          filetype: file.type || "application/octet-stream"
-        },
-        onChunkComplete(_chunkSize, bytesAccepted, bytesTotal) {
-          if (bytesTotal) {
-            uploadState.progress = Math.max(
-              uploadState.progress,
-              Math.min(99, Math.floor((bytesAccepted / bytesTotal) * 100))
-            );
-          }
-          uploadState.status = navigator.onLine ? "uploading" : "retrying";
-          onUpdate();
-        },
-        onProgress(bytesUploaded, bytesTotal) {
-          if (!bytesTotal) return;
-          uploadState.progress = Math.max(
-            uploadState.progress,
-            Math.min(99, Math.floor((bytesUploaded / bytesTotal) * 100))
-          );
-          uploadState.status = navigator.onLine ? "uploading" : "retrying";
-          onUpdate();
-        },
-        onUploadUrlAvailable() {
-          if (uploadState.task === upload) {
-            uploadState.uploadUrl = upload.url;
-          }
-        },
-        onError(error) {
-          const status = error.originalResponse?.getStatus?.();
-          if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
-            uploadState.status = "error";
-            uploadState.error = error.message || `Upload rejected (${status}).`;
-            uploadState.task = null;
-            uploadState.retryNow = null;
-            activeUploads.delete(uploadState);
-            onUpdate();
-            return;
-          }
-
-          uploadState.status = "retrying";
-          uploadState.error = "";
-          uploadState.task = null;
-          uploadState.retryNow = startAttempt;
-          onUpdate();
-          uploadState.retryTimer = window.setTimeout(startAttempt, 5000);
-        },
-        onSuccess() {
-          uploadState.status = "complete";
-          uploadState.progress = 100;
-          uploadState.error = "";
-          uploadState.task = null;
-          uploadState.uploadUrl = null;
-          uploadState.retryNow = null;
-          activeUploads.delete(uploadState);
-          onUpdate();
-          if (onComplete) onComplete();
-        }
-      });
-
-      uploadState.task = upload;
-      const start = () => {
-        if (uploadState.task === upload) upload.start();
-      };
-
-      if (uploadState.uploadUrl) {
-        start();
-        return;
-      }
-
-      upload.findPreviousUploads().then(previousUploads => {
-        if (uploadState.task !== upload) return;
-        const latestUpload = previousUploads
-          .slice()
-          .sort((a, b) => Date.parse(b.creationTime) - Date.parse(a.creationTime))[0];
-        if (latestUpload) {
-          upload.resumeFromPreviousUpload(latestUpload);
-          uploadState.uploadUrl = latestUpload.uploadUrl;
-        }
-        start();
-      }).catch(error => {
-        if (uploadState.task !== upload) return;
-        uploadState.status = "error";
-        uploadState.error = error instanceof Error ? error.message : "Could not resume this upload.";
-        uploadState.task = null;
-        uploadState.retryNow = null;
-        activeUploads.delete(uploadState);
-        onUpdate();
-      });
-    }
-
-    uploadState.retryNow = startAttempt;
-    startAttempt();
-  }
-
-  function stopUpload(uploadState) {
-    activeUploads.delete(uploadState);
-    uploadState.retryNow = null;
-    uploadState.onUpdate = null;
-    if (uploadState.retryTimer !== null) {
-      window.clearTimeout(uploadState.retryTimer);
-      uploadState.retryTimer = null;
-    }
-    if (uploadState.task) {
-      uploadState.task.abort();
-      uploadState.task = null;
-    }
-  }
-
-  window.addEventListener("offline", () => {
-    activeUploads.forEach(uploadState => {
-      if (uploadState.status !== "uploading") return;
-      uploadState.status = "retrying";
-      uploadState.onUpdate?.();
-    });
-  });
-
-  window.addEventListener("online", () => {
-    activeUploads.forEach(uploadState => {
-      if (
-        uploadState.status !== "retrying" ||
-        uploadState.task ||
-        !uploadState.retryNow
-      ) {
-        return;
-      }
-      if (uploadState.retryTimer !== null) {
-        window.clearTimeout(uploadState.retryTimer);
-        uploadState.retryTimer = null;
-      }
-      uploadState.retryNow();
-    });
-  });
-
-  // Render the status, output size, and download action for an image.
+  // File rows and folder batch state.
+  // Render an image's status, output size, and download action.
   function renderItem(item) {
-    const statusContent = item.upload.status === "error"
-      ? `
-        <span class="font-semibold text-red-700" title="${escapeHTML(item.upload.error || "Upload failed")}">
-          Upload failed
-        </span>`
-      : item.status === "uploading"
-      ? `
-        <span class="flex items-center justify-between gap-2 text-muted">
-          <span>${item.upload.status === "retrying"
-            ? (navigator.onLine ? "Reconnecting upload" : "Waiting for internet")
-            : "Uploading"}</span>
-          <span class="mono tabular-nums">${item.upload.progress}%</span>
-        </span>
-        <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${item.upload.progress}">
-          <span class="progress-fill block h-full rounded-full bg-forest transition-[width]" style="width:${item.upload.progress}%"></span>
-        </span>`
-      : item.status === "uploaded"
-      ? `
-        <span class="flex items-center justify-between gap-2 font-semibold text-forest">
-          <span>Uploaded ✓</span>
-          <span class="mono tabular-nums">100%</span>
-        </span>
-        <span class="mt-2 block h-1 w-full overflow-hidden rounded-full bg-ink/10" role="progressbar" aria-label="Upload complete" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
-          <span class="progress-fill block h-full rounded-full bg-forest" style="width:100%"></span>
-        </span>`
-      : item.status === "processing"
+    const statusContent = item.status === "processing"
       ? `
         <span class="flex items-center gap-2 text-clay">
           <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-clay"></span>
@@ -295,7 +85,7 @@
             ${item.withinLimit ? "Ready to download" : "Over size target"}
           </span>`
         : `
-          <span class="font-semibold text-red-700" title="${escapeHTML(item.upload.error || item.error || "Processing failed")}">
+          <span class="font-semibold text-red-700" title="${escapeHTML(item.error || "Processing failed")}">
               Could not compress
           </span>`;
     const output = item.status === "done"
@@ -307,7 +97,7 @@
       : item.status === "error"
         ? `<span class="text-xs text-red-700">${escapeHTML(item.error || "Try another image.")}</span>`
         : `<span class="text-muted">—</span>`;
-    const download = item.status === "done" && item.upload.status === "complete"
+    const download = item.status === "done"
       ? `
         <a
           href="${item.url}"
@@ -354,29 +144,27 @@
       </div>`;
   }
 
-  // Escape file names and errors before adding them to the page.
+  // Escape text before placing it in an HTML template.
   function escapeHTML(value) {
     return String(value).replace(/[&<>"']/g, char => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     })[char]);
   }
 
-  // Create image rows and folder archive cards.
+  // Create and register a file row.
   function makeItem(file) {
     const id = ++nextId;
     const item = {
       id,
       file,
-      status: "uploading",
+      status: "processing",
       progress: 0,
       output: null,
       url: null,
       preview: null,
       withinLimit: false,
       error: "",
-      maxKB: 0,
-      maxSizeLabel: "",
-      upload: createUploadState()
+      maxSizeLabel: ""
     };
     items.set(id, item);
     const row = document.createElement("article");
@@ -388,6 +176,7 @@
     return item;
   }
 
+  // Create a folder batch and its file rows.
   function makeFolderBatch(folderName, files) {
     const id = ++nextFolderId;
     const batch = {
@@ -410,44 +199,15 @@
     return batch;
   }
 
-  function startItemUpload(item, settings) {
-    const updateUpload = () => {
-      if (item.upload.status === "error") {
-        item.status = "error";
-        item.error = item.upload.error;
-        notice.textContent = `${item.file.name}: ${item.upload.error}`;
-      }
-      renderItem(item);
-      if (item.folderBatchId) {
-        const batch = folderBatches.get(item.folderBatchId);
-        if (batch) {
-          renderFolderBatch(batch);
-          buildFolderArchive(batch);
-        }
-      }
-    };
-
-    startResumableUpload(item.file, item.upload, updateUpload, () => {
-      if (!items.has(item.id)) return;
-      item.status = "uploaded";
-      renderItem(item);
-      if (item.folderBatchId) {
-        const batch = folderBatches.get(item.folderBatchId);
-        if (batch) {
-          renderFolderBatch(batch);
-          buildFolderArchive(batch);
-        }
-      }
-      window.setTimeout(() => {
-        if (!items.has(item.id) || item.status !== "uploaded") return;
-        item.status = "processing";
-        item.progress = 0;
-        renderItem(item);
-        compressItem(item, settings);
-      }, 800);
-    });
+  // Process selected files directly in the browser without uploading them.
+  function startItemProcessing(item, settings) {
+    item.status = "processing";
+    item.progress = 0;
+    renderItem(item);
+    compressItem(item, settings);
   }
 
+  // Render folder archive progress and its download action.
   function renderFolderBatch(batch) {
     let card = document.getElementById(`folder-archive-${batch.id}`);
     if (!card) {
@@ -470,7 +230,7 @@
       ? `
         <div class="flex flex-wrap items-center gap-2">
           <a href="${batch.archiveURL}" download="${escapeHTML(batch.folderName)}.zip" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-sm bg-forest px-4 py-2.5 text-xs font-bold text-white transition hover:bg-sky-900 focus:outline-none focus:ring-2 focus:ring-forest/40">Download ZIP <span aria-hidden="true">↓</span></a>
-          <span class="text-xs text-muted">ZIP uploads are not accepted by the server.</span>
+          <span class="text-xs text-muted">Includes images compressed successfully.</span>
         </div>`
       : `<span class="shrink-0 border border-ink/10 bg-white px-4 py-2.5 text-xs font-bold ${batch.status === "error" ? "text-red-700" : "text-muted"}">${batch.status === "zipping" ? "Preparing…" : batch.status === "error" ? "ZIP unavailable" : "ZIP pending"}</span>`;
     card.innerHTML = `
@@ -483,10 +243,10 @@
       ${action}`;
   }
 
-  // Package a completed folder batch into a downloadable ZIP archive.
+  // Package completed files into a downloadable ZIP archive.
   async function buildFolderArchive(batch) {
     const succeeded = batch.items.filter(item => item.status === "done");
-    if (batch.items.some(item => ["uploading", "uploaded", "processing"].includes(item.status))) return;
+    if (batch.items.some(item => item.status === "processing")) return;
     if (!succeeded.length) {
       batch.status = "error";
       renderFolderBatch(batch);
@@ -528,7 +288,8 @@
     renderFolderBatch(batch);
   }
 
-  // Resize to the requested bounds, then compress the JPEG in-browser.
+  // Image compression.
+  // Resize an image to the selected bounds and encode it as JPEG.
   function fitImageToBounds(file, maxWidth, maxHeight) {
     return new Promise((resolve, reject) => {
       const image = new Image();
@@ -572,6 +333,7 @@
     });
   }
 
+  // Compress an item until it meets the selected size target.
   async function compressItem(item, settings) {
     try {
       if ((settings.width !== null && (!Number.isInteger(settings.width) || settings.width < 1)) ||
@@ -580,9 +342,6 @@
       }
       if (!Number.isFinite(settings.maxKB) || settings.maxKB <= 0) {
         throw new Error("Enter valid dimensions and a size limit greater than zero.");
-      }
-      if (settings.maxKB > maxUploadBytes / 1024) {
-        throw new Error("The maximum compressed size is 60 MiB (60 MB).");
       }
       if (!window.imageCompression) {
         throw new Error("The compression library did not load. Check your connection and refresh.");
@@ -627,7 +386,6 @@
       item.url = URL.createObjectURL(item.output);
       item.status = "done";
       item.progress = 100;
-      item.maxKB = settings.maxKB;
       item.maxSizeLabel = settings.sizeLabel;
       item.withinLimit = item.output.size <= settings.maxKB * 1024;
     } catch (error) {
@@ -648,7 +406,8 @@
     }
   }
 
-  // Accept individual files and recursively read dropped folders.
+  // File selection and dropped folders.
+  // Filter selected files and start local processing.
   function acceptFiles(fileList, folderName = null) {
     const files = Array.from(fileList, file => ({
       file,
@@ -666,21 +425,23 @@
     const settings = getSettings();
     if (folderName && imageFiles.length) {
       const batch = makeFolderBatch(folderName, imageFiles);
-      batch.items.forEach(item => startItemUpload(item, settings));
+      batch.items.forEach(item => startItemProcessing(item, settings));
     } else {
       imageFiles.forEach(({ file }) => {
         const item = makeItem(file);
-        startItemUpload(item, settings);
+        startItemProcessing(item, settings);
       });
     }
     fileInput.value = "";
     folderInput.value = "";
   }
 
+  // Read every file contained in a dropped directory.
   function readDirectory(entry) {
     return new Promise((resolve, reject) => {
       const reader = entry.createReader();
       const files = [];
+      // Read directory entries in batches until none remain.
       function readNextBatch() {
         reader.readEntries(entries => {
           if (!entries.length) {
@@ -697,6 +458,7 @@
     });
   }
 
+  // Read a dropped file or recursively read a directory.
   function readEntry(entry) {
     if (entry.isFile) {
       return new Promise((resolve, reject) => {
@@ -710,6 +472,7 @@
     return Promise.resolve([]);
   }
 
+  // Collect dropped files and preserve folder paths.
   async function acceptDrop(dataTransfer) {
     const droppedItems = Array.from(dataTransfer.items || []).map(item => ({
       entry: typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null,
@@ -734,7 +497,8 @@
     }
   }
 
-  // Connect page controls to file selection, drag-and-drop, and cleanup.
+  // Page event handlers.
+  // Connect controls to settings, file selection, and drag-and-drop.
   presetSelect.addEventListener("change", updateTarget);
   ["custom-width", "custom-height", "custom-size", "custom-size-unit"].forEach(id => {
     document.getElementById(id).addEventListener("input", updateTarget);
@@ -766,7 +530,6 @@
   dropZone.addEventListener("drop", event => acceptDrop(event.dataTransfer));
   clearButton.addEventListener("click", () => {
     items.forEach(item => {
-      stopUpload(item.upload);
       if (item.url) URL.revokeObjectURL(item.url);
       if (item.preview) URL.revokeObjectURL(item.preview);
       const row = document.getElementById(`item-${item.id}`);
